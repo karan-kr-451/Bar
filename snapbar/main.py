@@ -2,6 +2,8 @@
 import sys
 import traceback
 from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtGui import QKeySequence
 from snapbar.bar import SnapBar
 
 from dotenv import load_dotenv
@@ -9,16 +11,106 @@ import logging
 from snapbar.core.logging_config import setup_logging
 
 
+class _HotkeyRelay(QObject):
+    """
+    Bridge between the keyboard library's background thread and the Qt main thread.
+    keyboard callbacks must never touch Qt widgets directly — emit a signal instead,
+    which Qt will deliver on the main thread via the event loop.
+    """
+    _triggered = pyqtSignal(object)
+
+    def __init__(self):
+        super().__init__()
+        self._triggered.connect(self._run)
+
+    def _run(self, cb):
+        try:
+            cb()
+        except Exception:
+            pass  # exception hooks will log it
+
+    def fire(self, cb):
+        """Call from any thread — safely dispatches cb() on the main thread."""
+        self._triggered.emit(cb)
+
+
+def _register_global_shortcuts(bar, log):
+    try:
+        import keyboard
+    except ImportError:
+        log.error("'keyboard' package not installed. Run: pip install keyboard")
+        return [], None
+
+    relay = _HotkeyRelay()
+
+    def make_safe_cb(cb):
+        def safe():
+            relay.fire(cb)
+        return safe
+
+    # Mode buttons
+    def make_mode_cb(index):
+        def cb():
+            buttons = bar._ai._mode_group.buttons()
+            if 0 <= index < len(buttons):
+                buttons[index].click()
+        return cb
+
+    # Category cycling
+    def cycle_category(direction):
+        def cb():
+            buttons = bar._ai._cat_group.buttons()
+            if not buttons:
+                return
+            current = next(
+                (i for i, b in enumerate(buttons) if b.isChecked()), 0
+            )
+            nxt = (current + direction) % len(buttons)
+            buttons[nxt].click()
+            log.info(
+                "Category cycled %s → %s",
+                "forward" if direction > 0 else "backward",
+                buttons[nxt].text(),
+            )
+        return cb
+
+    hotkeys = [
+        # Screenshots
+        ("shift+alt+f9",    bar._cap_full,         "Full screenshot"),
+        ("shift+alt+f10",   bar._cap_region,        "Region screenshot"),
+        ("shift+alt+f11",   bar._cap_window,        "Window screenshot"),
+        # AI panel
+        ("shift+alt+a",     bar._toggle_ai,         "Toggle AI panel"),
+        ("shift+alt+h",     bar._hide_panel,        "Hide AI panel"),
+        # Send
+        ("shift+alt+enter", bar._ai._send,          "Send request to AI"),
+        # Modes
+        ("shift+alt+1",     make_mode_cb(0),        "Switch to Images mode"),
+        ("shift+alt+2",     make_mode_cb(1),        "Switch to Audio mode"),
+        ("shift+alt+3",     make_mode_cb(2),        "Switch to Both mode"),
+        # Category cycling
+        ("shift+alt+right", cycle_category(+1),     "Next category"),
+        ("shift+alt+left",  cycle_category(-1),     "Previous category"),
+    ]
+
+    registered = 0
+    for combo, callback, description in hotkeys:
+        try:
+            keyboard.add_hotkey(combo, make_safe_cb(callback), suppress=False)
+            log.info("Registered global hotkey: %s -> %s", description, combo)
+            registered += 1
+        except Exception as e:
+            log.error("Failed to register hotkey %s (%s): %s", description, combo, e)
+
+    log.info("Registered %d global keyboard shortcuts", registered)
+    return hotkeys, relay  # both must stay alive — relay owns the signal connection
+
+
 def _install_exception_hooks(log):
     """
     Catch ALL unhandled exceptions — including those swallowed silently
     by PyQt's signal/slot mechanism — and write them to the log file.
-
-    Without this, any exception raised in a slot connected to a signal
-    gets printed to stderr (invisible when running as a windowed app)
-    and the widget silently stops working.
     """
-    # 1. Standard Python unhandled exception (non-main-thread crashes etc.)
     def excepthook(exc_type, exc_value, exc_tb):
         log.critical(
             "Unhandled exception:\n%s",
@@ -27,8 +119,6 @@ def _install_exception_hooks(log):
         sys.__excepthook__(exc_type, exc_value, exc_tb)
     sys.excepthook = excepthook
 
-    # 2. PyQt6 slot exceptions — Qt catches these before Python can,
-    #    so we must override the Qt message handler too.
     try:
         from PyQt6.QtCore import qInstallMessageHandler, QtMsgType
         def qt_message_handler(mode, context, message):
@@ -47,28 +137,29 @@ def _install_exception_hooks(log):
 import gc
 
 def main():
-    # Stop GC when application starts
     gc.disable()
-    
+
     try:
         load_dotenv()
         setup_logging()
         log = logging.getLogger("snapbar.main")
         _install_exception_hooks(log)
-    
+
         app = QApplication(sys.argv)
         log.info("Application starting (GC disabled)...")
         app.setQuitOnLastWindowClosed(True)
-        SnapBar()
+        bar = SnapBar()
+
+        # Keep both hotkeys list AND relay object alive for the entire session
+        _shortcuts, _relay = _register_global_shortcuts(bar, log)
+
         exit_code = app.exec()
         log.info("Application closed with exit code %d", exit_code)
-        
-        # Explicitly enable before sys.exit in try block
+
         gc.enable()
         log.info("GC re-enabled on shutdown.")
         sys.exit(exit_code)
     finally:
-        # Fallback to ensure it's reactivated even if exceptions bypass sys.exit
         gc.enable()
 
 
