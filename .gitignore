@@ -218,3 +218,4 @@ mcp-setup.sh
 MCP_CONFIGURATION.md
 docker-compose.yml
 mcp-servers.json
+.kiro
