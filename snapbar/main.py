@@ -154,11 +154,24 @@ def main():
         app.setQuitOnLastWindowClosed(True)
         bar = SnapBar()
 
+        # Guarantee AIWorker threads are cancelled before the process exits,
+        # even when the panel is hidden (closeEvent would never fire for a
+        # hidden widget, so we hook aboutToQuit directly).
+        app.aboutToQuit.connect(bar._ai._shutdown_workers)
+        log.info("Connected app.aboutToQuit → AIPanel._shutdown_workers")
+
         # Keep both hotkeys list AND relay object alive for the entire session
         _shortcuts, _relay = _register_global_shortcuts(bar, log)
 
         exit_code = app.exec()
         log.info("Application closed with exit code %d", exit_code)
+
+        try:
+            import keyboard
+            keyboard.unhook_all()
+            log.info("Keyboard hooks removed.")
+        except Exception as e:
+            log.debug("Failed to unhook keyboard: %s", e)
 
         gc.enable()
         log.info("GC re-enabled on shutdown.")

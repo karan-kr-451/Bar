@@ -981,7 +981,38 @@ class AIPanel(QWidget):
             self.show()
             self._open = True
 
-    def closeEvent(self, e):
+    def _shutdown_workers(self):
+        """
+        Cancel and join every live AIWorker thread.
+
+        Safe to call from any context — visible panel, hidden panel, or the
+        app.aboutToQuit signal — because it never touches the event loop.
+        Each worker is given up to 500 ms to finish cleanly; stragglers are
+        abandoned so the process can exit promptly.
+        """
         if self._recording:
-            self._stop_rec()
+            try:
+                self._stop_rec()
+            except Exception:
+                pass
+
+        self._update_timer.stop()
+
+        for worker in list(self._workers):
+            try:
+                worker.cancel()
+                if not worker.wait(500):          # 500 ms grace period
+                    logger.warning(
+                        "AIWorker did not stop within 500 ms — abandoning"
+                    )
+            except Exception:
+                pass
+
+        self._workers.clear()
+        logger.info("AIWorker shutdown complete")
+
+    def closeEvent(self, e):
+        # Reuse the shared shutdown helper so cleanup always runs the same
+        # way whether triggered by the panel's own close or app.aboutToQuit.
+        self._shutdown_workers()
         super().closeEvent(e)
