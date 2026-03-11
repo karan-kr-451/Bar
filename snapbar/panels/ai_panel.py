@@ -158,9 +158,10 @@ class AIPanel(QWidget):
         self._asig.transcript.connect(self._on_audio_text)
         self._asig.error.connect(lambda m: self._status(f"Audio: {m}", "#f87171"))
         self._asig.level.connect(self._on_level)
+        self._asig.clear_transcript.connect(self._on_clear_transcript)
         self._transcriber  = Transcriber(self._asig)
         self._chunk_timer  = QTimer(self)
-        self._chunk_timer.timeout.connect(self._transcriber.flush)
+        # self._chunk_timer.timeout.connect(self._transcriber.flush) # Handled by VAD now
 
         self.setWindowFlags(PANEL_FLAGS)
         self.setWindowOpacity(0.97)
@@ -610,6 +611,14 @@ class AIPanel(QWidget):
         self._update_badge()
         logger.info("Queue cleared")
         self._status("Queue cleared")
+
+    @safe_slot
+    def _on_clear_transcript(self):
+        """Called automatically when there is > 3 seconds of silence to reset the transcript."""
+        self._transcript = ""
+        self.trans_preview.setText("🎙 No transcript yet")
+        self._update_badge()
+        logger.debug("Transcript cleared due to >3s silence.")
 
     # ── history sanitization ──────────────────────────────────────
     def _build_api_history(self, provider: str) -> list[dict]:
