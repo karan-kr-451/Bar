@@ -84,6 +84,10 @@ def _register_global_shortcuts(bar, log):
         ("shift+alt+h",     bar._hide_panel,        "Hide AI panel"),
         # Send
         ("shift+alt+enter", bar._ai._send,          "Send request to AI"),
+        ("ctrl+enter",      bar._ai._send,          "Send request to AI (alt)"),
+        #clear que
+        ("shift+alt+c", bar._ai._clear_queue, "Clear send queue"),
+        ("shift+alt+delete", bar._ai._clear_queue, "Clear send queue (alt)"),
         # Modes
         ("shift+alt+1",     make_mode_cb(0),        "Switch to Images mode"),
         ("shift+alt+2",     make_mode_cb(1),        "Switch to Audio mode"),

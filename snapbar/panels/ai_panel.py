@@ -146,6 +146,9 @@ class AIPanel(QWidget):
         self._ai_resp    = ""
         self._recording  = False
         self._pending_send: dict | None = None   # saved args for 429 auto-retry
+        self._drag_pos   = None                  # frameless window drag
+        self._ever_shown = False                 # reposition only on first open
+        self._settings_open = False
 
         # Chunk buffering to prevent UI thread saturation (prevents "UI death")
         self._chunk_buffer = ""
@@ -165,7 +168,8 @@ class AIPanel(QWidget):
 
         self.setWindowFlags(PANEL_FLAGS)
         self.setWindowOpacity(0.97)
-        self.setFixedSize(820, 680)
+        self.setMinimumSize(340, 300)
+        self.resize(420, 420)
         self._build()
         self.hide()
 
@@ -173,6 +177,21 @@ class AIPanel(QWidget):
     def showEvent(self, e):
         super().showEvent(e)
         apply_stealth(self)
+
+    # ── drag to move (frameless window) ──────────────────────────
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._drag_pos is not None and e.buttons() & Qt.MouseButton.LeftButton:
+            self.move(e.globalPosition().toPoint() - self._drag_pos)
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        self._drag_pos = None
+        super().mouseReleaseEvent(e)
 
     # ── background ────────────────────────────────────────────────
     def paintEvent(self, _e):
@@ -186,31 +205,61 @@ class AIPanel(QWidget):
     # ── UI build ──────────────────────────────────────────────────
     def _build(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(18, 16, 18, 14)
-        root.setSpacing(9)
+        root.setContentsMargins(14, 10, 14, 10)
+        root.setSpacing(6)
 
-        # ── row 1: title + new-chat ───────────────────────────────
+        _sm_btn = (
+            "QPushButton{background:rgba(255,255,255,12);color:rgba(255,255,255,180);"
+            "border:1px solid rgba(255,255,255,22);border-radius:6px;}"
+            "QPushButton:hover{background:rgba(255,255,255,28);color:white;}"
+            "QPushButton:checked{background:rgba(99,102,241,0.4);color:white;"
+            "border:1px solid rgba(99,102,241,0.8);}"
+        )
+
+        # ── row 1: title + ⚙ gear + new-chat ─────────────────────
         r1 = QHBoxLayout()
         ttl = QLabel("✦  AI SOLVER")
-        ttl.setFont(QFont("Courier New", 11, QFont.Weight.Bold))
+        ttl.setFont(QFont("Courier New", 10, QFont.Weight.Bold))
         ttl.setStyleSheet("color:rgba(255,255,255,220);letter-spacing:3px;")
+        # Make title the drag handle — grab events don't bubble from buttons
+        ttl.setMouseTracking(True)
         r1.addWidget(ttl)
         r1.addStretch()
+
+        self.btn_settings = QPushButton("⚙")
+        self.btn_settings.setFixedSize(26, 24)
+        self.btn_settings.setFont(QFont("Courier New", 10))
+        self.btn_settings.setCheckable(True)
+        self.btn_settings.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_settings.setStyleSheet(_sm_btn)
+        self.btn_settings.setToolTip("Settings")
+        self.btn_settings.clicked.connect(self._toggle_settings)
+        r1.addWidget(self.btn_settings)
+
         nc = QPushButton("New chat")
-        nc.setFixedSize(72, 26)
+        nc.setFixedSize(66, 24)
         nc.setFont(QFont("Courier New", 8))
         nc.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        nc.setStyleSheet(
-            "QPushButton{background:rgba(255,255,255,12);color:rgba(255,255,255,170);"
-            "border:1px solid rgba(255,255,255,22);border-radius:6px;}"
-            "QPushButton:hover{background:rgba(255,255,255,28);color:white;}")
+        nc.setStyleSheet(_sm_btn)
         nc.clicked.connect(self._new_chat)
         r1.addWidget(nc)
         root.addLayout(r1)
 
-        # ── row 2: provider + model + key ─────────────────────────
-        r2 = QHBoxLayout()
-        r2.setSpacing(6)
+        # ── info strip ────────────────────────────────────────────
+        self.info_strip = QLabel("—")
+        self.info_strip.setFont(QFont("Courier New", 8))
+        self.info_strip.setStyleSheet(
+            "color:rgba(255,255,255,170);background:rgba(255,255,255,7);"
+            "border:1px solid rgba(255,255,255,14);border-radius:5px;padding:2px 8px;")
+        self.info_strip.setFixedHeight(22)
+        root.addWidget(self.info_strip)
+
+        # ── settings panel (hidden by default) ───────────────────
+        self._settings_panel = QWidget()
+        self._settings_panel.setVisible(False)
+        sp = QVBoxLayout(self._settings_panel)
+        sp.setContentsMargins(0, 2, 0, 4)
+        sp.setSpacing(5)
 
         self._env_keys = {
             "anthropic":  os.environ.get("ANTHROPIC_API_KEY",  ""),
@@ -225,9 +274,11 @@ class AIPanel(QWidget):
             l.setStyleSheet("color:rgba(255,255,255,140);")
             return l
 
+        # provider + model + key
+        r2 = QHBoxLayout(); r2.setSpacing(5)
         r2.addWidget(_lbl("Provider:"))
         self.prov_combo = QComboBox()
-        self.prov_combo.setFixedSize(110, 26)
+        self.prov_combo.setFixedSize(100, 24)
         self.prov_combo.setFont(QFont("Courier New", 8))
         self._cs(self.prov_combo)
         for p in PROVIDER_MODELS:
@@ -237,10 +288,11 @@ class AIPanel(QWidget):
 
         r2.addWidget(_lbl("Model:"))
         self.model_combo = QComboBox()
-        self.model_combo.setFixedHeight(26)
-        self.model_combo.setMinimumWidth(240)
+        self.model_combo.setFixedHeight(24)
+        self.model_combo.setMinimumWidth(110)
         self.model_combo.setFont(QFont("Courier New", 8))
         self._cs(self.model_combo)
+        self.model_combo.currentTextChanged.connect(lambda _: self._update_info_strip())
         r2.addWidget(self.model_combo, 1)
 
         r2.addWidget(_lbl("Key:"))
@@ -248,31 +300,28 @@ class AIPanel(QWidget):
         self.key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.key_edit.setPlaceholderText("API key…")
         self.key_edit.setFont(QFont("Courier New", 8))
-        self.key_edit.setFixedHeight(26)
-        self.key_edit.setMinimumWidth(180)
+        self.key_edit.setFixedHeight(24)
+        self.key_edit.setMinimumWidth(80)
         self.key_edit.setStyleSheet(
             "QLineEdit{background:rgba(255,255,255,12);color:white;"
-            "border:1px solid rgba(255,255,255,25);border-radius:6px;padding:2px 8px;}"
+            "border:1px solid rgba(255,255,255,25);border-radius:6px;padding:2px 6px;}"
             "QLineEdit:focus{border:1px solid #6366F1;}")
         r2.addWidget(self.key_edit, 1)
-
-        root.addLayout(r2)
+        sp.addLayout(r2)
         self._on_provider_change(self.prov_combo.currentText())
 
-        # ── row 3: audio device + rec + VU ───────────────────────
-        r3 = QHBoxLayout()
-        r3.setSpacing(6)
+        # audio
+        r3 = QHBoxLayout(); r3.setSpacing(5)
         r3.addWidget(QLabel("🎙"))
-
         self.dev_combo = QComboBox()
         self.dev_combo.setFont(QFont("Courier New", 8))
-        self.dev_combo.setFixedHeight(26)
+        self.dev_combo.setFixedHeight(24)
         self.dev_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._cs(self.dev_combo)
         r3.addWidget(self.dev_combo, 1)
 
         ref = QPushButton("↻")
-        ref.setFixedSize(26, 26)
+        ref.setFixedSize(24, 24)
         ref.setFont(QFont("Courier New", 10))
         ref.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         ref.setStyleSheet(
@@ -283,7 +332,7 @@ class AIPanel(QWidget):
         r3.addWidget(ref)
 
         self.btn_rec = QPushButton("● REC")
-        self.btn_rec.setFixedSize(72, 26)
+        self.btn_rec.setFixedSize(66, 24)
         self.btn_rec.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
         self.btn_rec.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_rec.setStyleSheet(btn_css("#EF4444"))
@@ -291,43 +340,36 @@ class AIPanel(QWidget):
         r3.addWidget(self.btn_rec)
 
         self.vu = QLabel()
-        self.vu.setFixedSize(120, 10)
-        self.vu.setStyleSheet("background:rgba(255,255,255,18);border-radius:5px;")
+        self.vu.setFixedSize(80, 8)
+        self.vu.setStyleSheet("background:rgba(255,255,255,18);border-radius:4px;")
         r3.addWidget(self.vu)
-
-        root.addLayout(r3)
+        sp.addLayout(r3)
         self._refresh_devices()
 
-        # ── category pills (horizontal scroll) ───────────────────
+        # categories
         cat_scroll = QScrollArea()
-        cat_scroll.setFixedHeight(42)
+        cat_scroll.setFixedHeight(38)
         cat_scroll.setWidgetResizable(True)
         cat_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         cat_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         cat_scroll.setStyleSheet(
             "QScrollArea{border:none;background:transparent;}"
-            "QScrollBar:horizontal{height:4px;background:transparent;}"
-            "QScrollBar::handle:horizontal{background:rgba(255,255,255,30);"
-            "border-radius:2px;}")
-        cat_inner = QWidget()
-        cat_inner.setStyleSheet("background:transparent;")
+            "QScrollBar:horizontal{height:3px;background:transparent;}"
+            "QScrollBar::handle:horizontal{background:rgba(255,255,255,30);border-radius:2px;}")
+        cat_inner = QWidget(); cat_inner.setStyleSheet("background:transparent;")
         cat_lay = QHBoxLayout(cat_inner)
-        cat_lay.setContentsMargins(0, 4, 0, 4)
-        cat_lay.setSpacing(4)
-
-        self._cat_group = QButtonGroup(self)
-        self._cat_group.setExclusive(True)
+        cat_lay.setContentsMargins(0, 2, 0, 2); cat_lay.setSpacing(4)
+        self._cat_group = QButtonGroup(self); self._cat_group.setExclusive(True)
         for i, cat in enumerate(CATEGORIES.keys()):
             btn = QPushButton(cat)
             btn.setCheckable(True)
             btn.setFont(QFont("Courier New", 8))
-            btn.setFixedHeight(28)
+            btn.setFixedHeight(26)
             btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             btn.setStyleSheet(
                 "QPushButton{background:rgba(255,255,255,10);color:rgba(255,255,255,150);"
-                "border:1px solid rgba(255,255,255,20);border-radius:7px;padding:2px 10px;}"
-                "QPushButton:checked{background:#6366F1;color:white;"
-                "border:1px solid #6366F1;}"
+                "border:1px solid rgba(255,255,255,20);border-radius:7px;padding:1px 8px;}"
+                "QPushButton:checked{background:#6366F1;color:white;border:1px solid #6366F1;}"
                 "QPushButton:hover{background:rgba(255,255,255,22);color:white;}")
             self._cat_group.addButton(btn, i)
             cat_lay.addWidget(btn)
@@ -335,36 +377,28 @@ class AIPanel(QWidget):
                 btn.setChecked(True)
         cat_lay.addStretch()
         cat_scroll.setWidget(cat_inner)
-        root.addWidget(cat_scroll)
+        sp.addWidget(cat_scroll)
+        self._cat_group.buttonClicked.connect(lambda _: self._update_info_strip())
 
-        # ── mode selector + badge + clear ─────────────────────────
-        r_mode = QHBoxLayout()
-        r_mode.setSpacing(6)
-        lbl_mode = QLabel("Mode:")
-        lbl_mode.setFont(QFont("Courier New", 8))
-        lbl_mode.setStyleSheet("color:rgba(255,255,255,140);")
-        r_mode.addWidget(lbl_mode)
-
-        self._mode_group = QButtonGroup(self)
-        self._mode_group.setExclusive(True)
-        for lbl, val in (("🖼 Images", "images"), ("🎙 Audio", "audio"), ("✦ Both", "both")):
-            r_mode.addWidget(self._mk_mode(lbl, val))
+        # mode + badge + clear
+        r_mode = QHBoxLayout(); r_mode.setSpacing(5)
+        r_mode.addWidget(_lbl("Mode:"))
+        self._mode_group = QButtonGroup(self); self._mode_group.setExclusive(True)
+        for lbl_txt, val in (("🖼 Images", "images"), ("🎙 Audio", "audio"), ("✦ Both", "both")):
+            r_mode.addWidget(self._mk_mode(lbl_txt, val))
         self._mode_group.buttons()[0].setChecked(True)
-        # re-check vision model whenever mode changes
         self._mode_group.buttonClicked.connect(self._on_mode_changed)
-
         r_mode.addStretch()
 
         self.badge = QLabel("0 imgs")
         self.badge.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
         self.badge.setStyleSheet(
             "color:#6366F1;background:rgba(99,102,241,0.15);"
-            "border:1px solid rgba(99,102,241,0.4);"
-            "border-radius:5px;padding:1px 8px;")
+            "border:1px solid rgba(99,102,241,0.4);border-radius:5px;padding:1px 6px;")
         r_mode.addWidget(self.badge)
 
         b_clr = QPushButton("Clear queue")
-        b_clr.setFixedSize(88, 24)
+        b_clr.setFixedSize(80, 22)
         b_clr.setFont(QFont("Courier New", 8))
         b_clr.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         b_clr.setStyleSheet(
@@ -374,45 +408,46 @@ class AIPanel(QWidget):
             "border:1px solid rgba(239,68,68,0.5);}")
         b_clr.clicked.connect(self._clear_queue)
         r_mode.addWidget(b_clr)
-        root.addLayout(r_mode)
+        sp.addLayout(r_mode)
 
-        # ── chat display ──────────────────────────────────────────
+        root.addWidget(self._settings_panel)
+
+        # ── chat ──────────────────────────────────────────────────
         self.chat = QTextEdit()
         self.chat.setReadOnly(True)
         self.chat.setFont(QFont("Courier New", 9))
         self.chat.setStyleSheet(
             "QTextEdit{background:rgba(255,255,255,6);color:rgba(255,255,255,200);"
             "border:1px solid rgba(255,255,255,14);border-radius:8px;padding:8px;}"
-            "QScrollBar:vertical{width:6px;background:transparent;}"
+            "QScrollBar:vertical{width:5px;background:transparent;}"
             "QScrollBar::handle:vertical{background:rgba(255,255,255,30);border-radius:3px;}")
         root.addWidget(self.chat, 1)
 
-        # ── transcript preview ────────────────────────────────────
+        # ── transcript strip ──────────────────────────────────────
         self.trans_preview = QLabel("🎙 No transcript yet")
         self.trans_preview.setFont(QFont("Courier New", 8))
         self.trans_preview.setStyleSheet(
-            "color:rgba(255,255,255,100);background:rgba(255,255,255,6);"
-            "border:1px solid rgba(255,255,255,14);border-radius:6px;padding:4px 8px;")
-        self.trans_preview.setWordWrap(True)
-        self.trans_preview.setFixedHeight(36)
+            "color:rgba(255,255,255,90);background:rgba(255,255,255,5);"
+            "border:1px solid rgba(255,255,255,12);border-radius:5px;padding:2px 7px;")
+        self.trans_preview.setWordWrap(False)
+        self.trans_preview.setFixedHeight(22)
         root.addWidget(self.trans_preview)
 
         # ── prompt + send ─────────────────────────────────────────
-        r_p = QHBoxLayout()
-        r_p.setSpacing(6)
+        r_p = QHBoxLayout(); r_p.setSpacing(6)
         self.prompt = QTextEdit()
         self.prompt.setPlaceholderText("Extra instruction (optional)…")
         self.prompt.setFont(QFont("Courier New", 9))
-        self.prompt.setFixedHeight(58)
+        self.prompt.setFixedHeight(46)
         self.prompt.setStyleSheet(
             "QTextEdit{background:rgba(255,255,255,9);color:white;"
-            "border:1px solid rgba(255,255,255,22);border-radius:8px;padding:6px 8px;}"
+            "border:1px solid rgba(255,255,255,22);border-radius:8px;padding:5px 8px;}"
             "QTextEdit:focus{border:1px solid #6366F1;}")
         r_p.addWidget(self.prompt, 1)
 
         self.btn_send = QPushButton("Send ▶")
-        self.btn_send.setFixedSize(88, 58)
-        self.btn_send.setFont(QFont("Courier New", 10, QFont.Weight.Bold))
+        self.btn_send.setFixedSize(76, 46)
+        self.btn_send.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
         self.btn_send.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_send.setStyleSheet(btn_css("#6366F1"))
         self.btn_send.clicked.connect(self._send)
@@ -424,6 +459,30 @@ class AIPanel(QWidget):
         self.status_lbl.setFont(QFont("Courier New", 8))
         self.status_lbl.setStyleSheet("color:rgba(255,255,255,110);")
         root.addWidget(self.status_lbl)
+
+        # All widgets ready — do initial info strip fill
+        self._update_info_strip()
+
+    # ── settings toggle ───────────────────────────────────────────
+    def _toggle_settings(self, checked: bool):
+        self._settings_panel.setVisible(checked)
+        self.adjustSize()
+        scr_h = QGuiApplication.primaryScreen().geometry().height()
+        if self.height() > int(scr_h * 0.80):
+            self.resize(self.width(), int(scr_h * 0.80))
+
+    # ── info strip ───────────────────────────────────────────────
+    def _update_info_strip(self):
+        if not all(hasattr(self, a) for a in
+                   ("_cat_group", "_mode_group", "model_combo", "info_strip")):
+            return
+        cat_btn = self._cat_group.checkedButton()
+        cat  = cat_btn.text() if cat_btn else "—"
+        mode = {"images": "🖼 Images", "audio": "🎙 Audio",
+                "both": "✦ Both"}.get(self._get_mode(), "—")
+        m    = self.model_combo.currentText()
+        model = m.split("/")[-1] if m else "—"
+        self.info_strip.setText(f"  {cat}  ·  {mode}  ·  {model}")
 
     # ── combo stylesheet ──────────────────────────────────────────
     def _cs(self, w):
@@ -474,14 +533,14 @@ class AIPanel(QWidget):
         for m in PROVIDER_MODELS.get(provider, []):
             self.model_combo.addItem(m)
         self.key_edit.setText(self._env_keys.get(provider, ""))
-        # After repopulating models, re-apply vision auto-select if needed
         if self._images and self._get_mode() in ("images", "both"):
             self._auto_select_vision_model(silent=True)
+        self._update_info_strip()
 
     def _on_mode_changed(self, _btn):
-        """When the user switches to a mode that includes images, ensure a vision model."""
         if self._images and self._get_mode() in ("images", "both"):
             self._auto_select_vision_model()
+        self._update_info_strip()
 
     # ── vision + reasoning model auto-select ─────────────────────
     def _auto_select_vision_model(self, *, silent: bool = False) -> bool:
@@ -911,11 +970,13 @@ class AIPanel(QWidget):
         self.move(x, y)
 
     def toggle(self):
-        self._reposition()
         if self._open:
             self.hide()
             self._open = False
         else:
+            if not self._ever_shown:
+                self._reposition()
+                self._ever_shown = True
             self._update_badge()
             self.show()
             self._open = True
